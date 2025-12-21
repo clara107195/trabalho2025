@@ -1,0 +1,814 @@
+import json
+
+def carregaMedicos():
+    with open("medicos.json", encoding="utf-8") as f:
+        return json.load(f)
+
+def carregaPacientes():
+    with open("pacientes.json", encoding="utf-8") as f:
+        return json.load(f)
+import random
+import math
+
+# Constantes
+CHEGADA = 0
+SAIDA = 1
+
+def simula(parametros, medicos_data, pacientes_data):
+    """Versão corrigida - tempo de consulta correto"""
+    
+    # Configurar semente aleatória
+    if "seed" in parametros:
+        random.seed(parametros["seed"])
+    
+    lamb = parametros["lambda"]
+    duracao_turno = parametros["simtime"]
+    
+    # Preparar estrutura de médicos
+    medicos = []
+    i = 0
+    while i < len(medicos_data):
+        # [dados, ocupado?, paciente_atual, tempo_inicio_atual, tempo_total_ocupado, atendimentos, duracao_planejada]
+        linha = [medicos_data[i], False, None, 0.0, 0.0, 0, 0.0]
+        medicos.append(linha)
+        i = i + 1
+    
+    # Inicializar estruturas
+    eventos = []
+    fila = []
+    
+    # Inicializar estatísticas
+    estatisticas = {
+        "atendidos": 0,
+        "tempos_espera": [],
+        "tempos_atendimento": [],  # Aqui vamos guardar o tempo REAL de cada consulta
+        "ocupacao_medicos": [0.0] * len(medicos),
+        "atendimentos_por_medico": [0] * len(medicos)
+    }
+    
+    # Registrar tempos de chegada
+    chegadas = {}
+    
+    # Gerar eventos iniciais de chegada
+    tempo_atual = 0.0
+    idx_paciente = 0
+    
+    # Agendar pausas (2 pausas de 15 minutos = 0.25 horas cada)
+    horarios_pausa = []
+    i = 0
+    while i < len(medicos):
+        # Primeira pausa (2h - 2.25h)
+        if 2.0 < duracao_turno:
+            horarios_pausa.append((2.0, 2.25, i))
+        
+        # Segunda pausa (4h - 4.25h)
+        if 4.0 < duracao_turno:
+            horarios_pausa.append((4.0, 4.25, i))
+        
+        i = i + 1
+    
+    # Gerar chegadas de pacientes
+    while tempo_atual < duracao_turno and idx_paciente < len(pacientes_data):
+        paciente = pacientes_data[idx_paciente]
+        chegadas[paciente["id"]] = tempo_atual
+        
+        # Criar evento de chegada
+        evento = (tempo_atual, CHEGADA, paciente["id"])
+        eventos = enqueue(eventos, evento)
+        
+        # Gerar próxima chegada
+        intervalo = genTempoChegada(lamb)
+        tempo_atual = tempo_atual + intervalo
+        idx_paciente = idx_paciente + 1
+    
+    # Executar loop de eventos
+    tempo_simulacao = 0.0
+    
+    while eventos != []:
+        # Pegar próximo evento
+        ev, eventos = dequeue(eventos)
+        tempo_evento, tipo_evento, paciente_id = ev
+        
+        tempo_simulacao = tempo_evento
+        
+        # Encontrar paciente
+        paciente = None
+        i = 0
+        while i < len(pacientes_data) and paciente is None:
+            if pacientes_data[i]["id"] == paciente_id:
+                paciente = pacientes_data[i]
+            i = i + 1
+        
+        if paciente is None:
+            continue
+        
+        # ------------------------------------
+        # EVENTO DE CHEGADA
+        # ------------------------------------
+        if tipo_evento == CHEGADA:
+            # Verificar se médico está disponível
+            medico_disponivel = None
+            medico_idx = -1
+            
+            i = 0
+            while i < len(medicos):
+                if not medicos[i][1]:  # não ocupado
+                    # Verificar se não está em pausa
+                    em_pausa = False
+                    j = 0
+                    while j < len(horarios_pausa):
+                        inicio_pausa, fim_pausa, idx_medico_pausa = horarios_pausa[j]
+                        if idx_medico_pausa == i and tempo_evento >= inicio_pausa and tempo_evento < fim_pausa:
+                            em_pausa = True
+                        j = j + 1
+                    
+                    if not em_pausa:
+                        medico_disponivel = medicos[i]
+                        medico_idx = i
+                        i = len(medicos)  # sair do loop
+                i = i + 1
+            
+            if medico_disponivel is not None:
+                # Atender imediatamente
+                medico_disponivel[1] = True
+                medico_disponivel[2] = paciente_id
+                medico_disponivel[3] = tempo_evento
+                medico_disponivel[5] = medico_disponivel[5] + 1
+                
+                # Calcular DURAÇÃO PLANEJADA da consulta
+                duracao_planejada = genTempoConsulta(medico_disponivel[0], paciente)
+                medico_disponivel[6] = duracao_planejada  # guardar duração planejada
+                
+                # Calcular quando terminará a consulta
+                tempo_fim_planejado = tempo_evento + duracao_planejada
+                
+                # Verificar se há pausa durante esta consulta
+                j = 0
+                while j < len(horarios_pausa):
+                    inicio_pausa, fim_pausa, idx_medico = horarios_pausa[j]
+                    if idx_medico == medico_idx:
+                        # Se a consulta cruza com a pausa
+                        if tempo_evento < fim_pausa and tempo_fim_planejado > inicio_pausa:
+                            # Ajustar para depois da pausa
+                            tempo_fim_planejado = fim_pausa + (duracao_planejada - (inicio_pausa - tempo_evento))
+                    j = j + 1
+                
+                # Se termina depois do turno, ajustar
+                if tempo_fim_planejado > duracao_turno:
+                    tempo_fim_planejado = duracao_turno
+                
+                # Agendar saída
+                if tempo_fim_planejado <= duracao_turno:
+                    novo_evento = (tempo_fim_planejado, SAIDA, paciente_id)
+                    eventos = enqueue(eventos, novo_evento)
+                
+                # Tempo de espera
+                tempo_espera = tempo_evento - chegadas[paciente_id]
+                estatisticas["tempos_espera"].append(tempo_espera)
+                
+            else:
+                # Colocar na fila
+                fila.append(paciente)
+                fila = ordenarFila(fila)
+        
+        # ------------------------------------
+        # EVENTO DE SAÍDA
+        # ------------------------------------
+        elif tipo_evento == SAIDA:
+            estatisticas["atendidos"] = estatisticas["atendidos"] + 1
+            
+            # Encontrar médico que atendeu
+            i = 0
+            while i < len(medicos):
+                if medicos[i][2] == paciente_id:
+                    # Calcular tempo REAL da consulta
+                    tempo_inicio = medicos[i][3]
+                    duracao_real = tempo_evento - tempo_inicio
+                    
+                    # Adicionar tempo REAL à lista
+                    estatisticas["tempos_atendimento"].append(duracao_real)
+                    
+                    # Adicionar ao tempo ocupado total do médico
+                    medicos[i][4] = medicos[i][4] + duracao_real
+                    
+                    # Liberar médico
+                    medicos[i][1] = False
+                    medicos[i][2] = None
+                    medicos[i][3] = 0.0
+                    medicos[i][6] = 0.0
+                    
+                    # Tentar atender próximo da fila
+                    if fila != [] and tempo_evento < duracao_turno:
+                        prox_paciente = fila[0]
+                        fila = fila[1:]
+                        
+                        # Verificar se médico está em pausa agora
+                        em_pausa = False
+                        j = 0
+                        while j < len(horarios_pausa):
+                            inicio_pausa, fim_pausa, idx_medico = horarios_pausa[j]
+                            if idx_medico == i and tempo_evento >= inicio_pausa and tempo_evento < fim_pausa:
+                                em_pausa = True
+                            j = j + 1
+                        
+                        if not em_pausa:
+                            # Atender próximo
+                            medicos[i][1] = True
+                            medicos[i][2] = prox_paciente["id"]
+                            medicos[i][3] = tempo_evento
+                            medicos[i][5] = medicos[i][5] + 1
+                            
+                            # Calcular duração planejada
+                            duracao_planejada = genTempoConsulta(medicos[i][0], prox_paciente)
+                            medicos[i][6] = duracao_planejada
+                            
+                            # Calcular tempo de término
+                            tempo_fim_planejado = tempo_evento + duracao_planejada
+                            
+                            # Verificar pausas
+                            j = 0
+                            while j < len(horarios_pausa):
+                                inicio_pausa, fim_pausa, idx_medico = horarios_pausa[j]
+                                if idx_medico == i:
+                                    if tempo_evento < fim_pausa and tempo_fim_planejado > inicio_pausa:
+                                        tempo_fim_planejado = fim_pausa + (duracao_planejada - (inicio_pausa - tempo_evento))
+                                j = j + 1
+                            
+                            if tempo_fim_planejado > duracao_turno:
+                                tempo_fim_planejado = duracao_turno
+                            
+                            if tempo_fim_planejado <= duracao_turno:
+                                novo_evento = (tempo_fim_planejado, SAIDA, prox_paciente["id"])
+                                eventos = enqueue(eventos, novo_evento)
+                            
+                            tempo_espera = tempo_evento - chegadas[prox_paciente["id"]]
+                            estatisticas["tempos_espera"].append(tempo_espera)
+                    
+                    i = len(medicos)  # sair do loop
+                i = i + 1
+    
+    # Calcular estatísticas finais
+    i = 0
+    while i < len(medicos):
+        # Tempo total disponível (descontando pausas)
+        tempo_total_disponivel = duracao_turno - 0.5  # 30 minutos de pausas
+        
+        if tempo_total_disponivel > 0:
+            ocupacao = (medicos[i][4] / tempo_total_disponivel) * 100
+        else:
+            ocupacao = 0
+        
+        # Garantir máximo 100%
+        if ocupacao > 100:
+            ocupacao = 100
+        
+        estatisticas["ocupacao_medicos"][i] = ocupacao
+        estatisticas["atendimentos_por_medico"][i] = medicos[i][5]
+        i = i + 1
+    
+    # Calcular médias CORRETAMENTE
+    if estatisticas["atendidos"] > 0:
+        # Média de espera
+        soma_espera = 0
+        i = 0
+        while i < len(estatisticas["tempos_espera"]):
+            soma_espera = soma_espera + estatisticas["tempos_espera"][i]
+            i = i + 1
+        estatisticas["espera_media"] = soma_espera / estatisticas["atendidos"]
+        
+        # Média de atendimento (tempo REAL)
+        soma_atendimento = 0
+        i = 0
+        while i < len(estatisticas["tempos_atendimento"]):
+            soma_atendimento = soma_atendimento + estatisticas["tempos_atendimento"][i]
+            i = i + 1
+        estatisticas["atendimento_medio"] = soma_atendimento / estatisticas["atendidos"]
+    else:
+        estatisticas["espera_media"] = 0
+        estatisticas["atendimento_medio"] = 0
+    
+    return estatisticas
+
+
+# -------------------------------------------------
+# FUNÇÕES AUXILIARES - TODAS DEFINIDAS AQUI
+# -------------------------------------------------
+
+def enqueue(lista, elem):
+    """Adiciona elemento à lista mantendo ordenação por tempo"""
+    lista.append(elem)
+    # Ordena pelo primeiro elemento (tempo)
+    lista.sort(key=lambda x: x[0])
+    return lista
+
+def dequeue(lista):
+    """Remove e retorna o primeiro elemento da lista"""
+    if len(lista) == 0:
+        return None, []
+    elem = lista[0]
+    nova = lista[1:]
+    return elem, nova
+
+def genTempoChegada(lamb):
+    """Gera tempo entre chegadas (distribuição exponencial)"""
+    r = random.random()
+    # Evitar log(0)
+    if r == 0:
+        r = 0.000001
+    return -math.log(1 - r) / lamb
+
+def genTempoConsulta(medico, paciente):
+    """Gera tempo de consulta baseado no médico e paciente"""
+    r = random.random()
+    # Evitar log(0)
+    if r == 0:
+        r = 0.000001
+    
+    # Tempo base da distribuição exponencial
+    tempo_base = -math.log(1 - r) * medico["media_consulta"]
+    
+    # Aumenta tempo conforme número de doenças
+    num_doencas = len(paciente.get("doencas", []))
+    fator_doencas = 1 + (0.15 * num_doencas)
+    
+    tempo_final = tempo_base * fator_doencas
+    
+    return tempo_final
+
+def procuraMedico(medicos):
+    """Procura médico livre - mantida para compatibilidade"""
+    i = 0
+    res = None
+    while i < len(medicos):
+        if medicos[i][1] == False:
+            res = medicos[i]
+            i = len(medicos)  # sair do loop
+        i = i + 1
+    return res
+
+def ordenarFila(fila):
+    """Ordena fila por prioridade (1 é mais urgente)"""
+    fila.sort(key=lambda x: x["prioridade"])
+    return fila
+
+
+import FreeSimpleGUI as sg
+import clinicaDataset as ds
+import clinicaSimulador as sim
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import numpy as np
+
+def interface():
+    sg.theme("LightBlue")
+
+    # Frame for simulation configuration
+    config_frame = sg.Frame("Configurações da Simulação", [
+        [sg.Text("Taxa de Chegada (pacientes/hora):", tooltip="Número médio de pacientes que chegam por hora"),
+         sg.InputText("2.0", key='-LAMBDA-', size=(10,1), tooltip="Ex: 2.0 para 2 pacientes/hora")],
+
+        [sg.Text("Duração da Simulação (horas):", tooltip="Tempo total da simulação em horas"),
+         sg.InputText("8.0", key='-TIME-', size=(10,1), tooltip="Ex: 8.0 para 8 horas")],
+
+        [sg.Text("Semente Aleatória:", tooltip="Valor para reprodutibilidade dos resultados"),
+         sg.InputText("42", key='-SEED-', size=(10,1), tooltip="Ex: 42 (número inteiro)")]
+    ], font=('Arial', 12), title_color='darkblue')
+
+    # Frame for actions
+    actions_frame = sg.Frame("Ações", [
+        [sg.Button("Executar Simulação", key='-SIM-', size=(20,2),
+                  button_color=('white', 'darkgreen'), font=('Arial', 10),
+                  tooltip="Inicia a simulação com os parâmetros configurados")],
+
+        [sg.Button("Mostrar Médicos", key='-MED-', size=(20,1),
+                  button_color=('white', 'steelblue'), tooltip="Exibe lista de médicos cadastrados"),
+         sg.Button("Mostrar Pacientes", key='-PAC-', size=(20,1),
+                  button_color=('white', 'steelblue'), tooltip="Exibe lista de pacientes cadastrados")],
+
+        [sg.Button("Ver Resultados Detalhados", key='-DET-', size=(20,1),
+                  button_color=('white', 'orange'), tooltip="Mostra estatísticas detalhadas da simulação"),
+         sg.Button("Mostrar Gráficos", key='-GRAF-', size=(20,1),
+                  button_color=('white', 'orange'), tooltip="Exibe gráficos da simulação")]
+    ], font=('Arial', 12), title_color='darkblue')
+
+    # Frame for results
+    results_frame = sg.Frame("Resultados", [
+        [sg.Multiline("Aguardando simulação...", key='-OUTPUT-',
+                      size=(100, 20), font=('Courier', 9),
+                      background_color='white', text_color='black', autoscroll=True)]
+    ], font=('Arial', 12), title_color='darkblue')
+
+    layout = [
+        [sg.Text("Simulação Clínica Médica", font=('Arial', 24, 'bold'), text_color='navy', justification='center')],
+        [sg.HorizontalSeparator()],
+
+        [config_frame],
+        [sg.HorizontalSeparator()],
+
+        [actions_frame],
+        [sg.HorizontalSeparator()],
+
+        [results_frame],
+
+        [sg.StatusBar("Pronto para simular", key='-STATUS-', size=(80,1), font=('Arial', 9))],
+
+        [sg.Button("Sair", key='-SAIR-', size=(15,1), button_color=('white', 'darkred'),
+                  font=('Arial', 10), tooltip="Fecha a aplicação")]
+    ]
+
+    win = sg.Window("Clinica - Simulador", layout, resizable=True)
+
+    ultimos_resultados = None
+    ultimos_medicos = None
+    
+    continuar_loop = True
+    while continuar_loop:
+        ev, val = win.read()
+
+        if ev == sg.WIN_CLOSED or ev == '-SAIR-':
+            continuar_loop = False
+        elif ev == '-SIM-':
+            try:
+                win['-STATUS-'].update("Carregando dados...")
+                win.refresh()
+                
+                medicos = ds.carregaMedicos()
+                pacientes = ds.carregaPacientes()
+                ultimos_medicos = medicos
+                
+                try:
+                    taxa_chegada = float(val['-LAMBDA-'])
+                    duracao = float(val['-TIME-'])
+                    semente = int(val['-SEED-'])
+                except:
+                    taxa_chegada = 2.0
+                    duracao = 8.0
+                    semente = 42
+                
+                param = {
+                    "lambda": taxa_chegada,
+                    "simtime": duracao,
+                    "seed": semente
+                }
+                
+                win['-STATUS-'].update("Executando simulacao...")
+                win.refresh()
+                
+                resultados = sim.simula(param, medicos, pacientes)
+                ultimos_resultados = resultados
+                
+                output_text = "=" * 60 + "\n"
+                output_text += "RESULTADOS DA SIMULACAO\n"
+                output_text += "=" * 60 + "\n\n"
+                
+                output_text += "CONFIGURACOES:\n"
+                output_text += f"  Taxa de chegada: {taxa_chegada} pacientes/hora\n"
+                output_text += f"  Duracao: {duracao} horas\n"
+                output_text += f"  Semente: {semente}\n\n"
+                
+                output_text += "ESTATISTICAS GERAIS:\n"
+                output_text += f"  Pacientes atendidos: {resultados['atendidos']}\n"
+                
+                if 'espera_media' in resultados:
+                    espera_min = resultados['espera_media'] * 60
+                    output_text += f"  Tempo medio de espera: {resultados['espera_media']:.2f} horas ({espera_min:.0f} min)\n"
+                
+                if 'atendimento_medio' in resultados:
+                    atend_min = resultados['atendimento_medio'] * 60
+                    output_text += f"  Tempo medio de atendimento: {resultados['atendimento_medio']:.2f} horas ({atend_min:.0f} min)\n"
+                
+                output_text += "\nRESUMO:\n"
+                output_text += f"  Total de medicos: {len(medicos)}\n"
+                output_text += f"  Total de pacientes: {len(pacientes)}\n"
+                
+                win['-OUTPUT-'].update(output_text)
+                win['-STATUS-'].update(f"Simulacao concluida! Atendidos: {resultados['atendidos']} pacientes")
+                
+            except Exception as e:
+                import traceback
+                erro_detalhado = traceback.format_exc()
+                win['-OUTPUT-'].update(f"ERRO na simulacao:\n{str(e)}\n\nDetalhes:\n{erro_detalhado}")
+                win['-STATUS-'].update("Erro na simulacao")
+
+        elif ev == '-MED-':
+            try:
+                medicos = ds.carregaMedicos()
+                mostraMedicos(medicos)
+                win['-STATUS-'].update(f"Carregados {len(medicos)} medicos")
+            except Exception as e:
+                sg.popup_error(f"Erro ao carregar medicos: {str(e)}")
+
+        elif ev == '-PAC-':
+            try:
+                pacientes = ds.carregaPacientes()
+                mostraPacientes(pacientes)
+                win['-STATUS-'].update(f"Carregados {len(pacientes)} pacientes")
+            except Exception as e:
+                sg.popup_error(f"Erro ao carregar pacientes: {str(e)}")
+
+        elif ev == '-DET-':
+            if ultimos_resultados is not None and ultimos_medicos is not None:
+                mostraResultadosDetalhados(ultimos_resultados, ultimos_medicos)
+            else:
+                sg.popup("Aviso", "Execute uma simulacao primeiro para ver resultados detalhados.")
+
+        elif ev == '-GRAF-':
+            if ultimos_resultados is not None and ultimos_medicos is not None:
+                mostrarGraficos(ultimos_resultados, ultimos_medicos)
+            else:
+                sg.popup("Aviso", "Execute uma simulacao primeiro para ver graficos.")
+
+    win.close()
+
+
+def mostraMedicos(m):
+    data = []
+    for medico in m:
+        tempo_consulta = medico['media_consulta']
+        minutos = int(tempo_consulta * 60)
+        data.append([
+            medico["id"],
+            medico["nome"],
+            medico["especialidade"],
+            f"{minutos} min"
+        ])
+    
+    layout = [
+        [sg.Text(f"Lista de Medicos ({len(m)} registros)", font=('Arial', 14))],
+        [sg.Table(
+            data,
+            headings=["ID", "Nome", "Especialidade", "Tempo Medio"],
+            auto_size_columns=False,
+            col_widths=[5, 25, 15, 15],
+            justification='left',
+            num_rows=min(20, len(data))
+        )],
+        [sg.Button("Fechar")]
+    ]
+    
+    sg.Window("Medicos", layout, modal=True, size=(700, 400)).read(close=True)
+
+
+def mostraPacientes(p):
+    data = []
+    for paciente in p:
+        doencas_texto = ", ".join(paciente["doencas"]) if paciente["doencas"] else "Nenhuma"
+        data.append([
+            paciente["id"],
+            paciente["nome"],
+            paciente["idade"],
+            paciente["sexo"],
+            paciente["prioridade"],
+            doencas_texto
+        ])
+    
+    layout = [
+        [sg.Text(f"Lista de Pacientes ({len(p)} registros)", font=('Arial', 14))],
+        [sg.Table(
+            data,
+            headings=["ID", "Nome", "Idade", "Sexo", "Prior.", "Doencas"],
+            auto_size_columns=False,
+            col_widths=[5, 20, 8, 8, 8, 30],
+            justification='left',
+            num_rows=min(15, len(data))
+        )],
+        [sg.Text("Prioridade: 1=mais urgente, 5=menos urgente")],
+        [sg.Button("Fechar")]
+    ]
+    
+    sg.Window("Pacientes", layout, modal=True, size=(900, 400)).read(close=True)
+
+
+def mostraResultadosDetalhados(resultados, medicos):
+    layout = [
+        [sg.Text("Resultados Detalhados da Simulacao", font=('Arial', 16))],
+        [sg.Text("=" * 50)],
+        
+        [sg.Text(f"Pacientes atendidos: {resultados.get('atendidos', 0)}")],
+    ]
+    
+    if 'espera_media' in resultados:
+        espera_min = resultados['espera_media'] * 60
+        layout.append([sg.Text(f"Tempo medio de espera: {resultados['espera_media']:.2f} horas ({espera_min:.0f} min)")])
+    
+    if 'atendimento_medio' in resultados:
+        atend_min = resultados['atendimento_medio'] * 60
+        layout.append([sg.Text(f"Tempo medio de atendimento: {resultados['atendimento_medio']:.2f} horas ({atend_min:.0f} min)")])
+    
+    if 'ocupacao_medicos' in resultados and len(resultados['ocupacao_medicos']) > 0:
+        layout.append([sg.Text("")])
+        layout.append([sg.Text("Ocupacao dos Medicos:", font=('Arial', 12))])
+        
+        i = 0
+        while i < len(medicos) and i < len(resultados['ocupacao_medicos']):
+            ocupacao = resultados['ocupacao_medicos'][i]
+            barra_tamanho = int(ocupacao / 5)
+            barra = "#" * barra_tamanho
+            
+            layout.append([
+                sg.Text(f"{medicos[i]['nome']}:", size=(20,1)),
+                sg.Text(f"{ocupacao:.1f}%", size=(10,1)),
+                sg.Text(barra, text_color='darkgreen')
+            ])
+            i = i + 1
+    
+    if 'tempos_espera' in resultados and resultados['tempos_espera']:
+        layout.append([sg.Text("")])
+        layout.append([sg.Text("Tempos de Espera:", font=('Arial', 12))])
+        
+        esperas = resultados['tempos_espera']
+        if esperas:
+            media_espera = sum(esperas) / len(esperas)
+            min_espera = min(esperas)
+            max_espera = max(esperas)
+            layout.append([sg.Text(f"  Media: {media_espera:.2f} horas")])
+            layout.append([sg.Text(f"  Minimo: {min_espera:.2f} horas")])
+            layout.append([sg.Text(f"  Maximo: {max_espera:.2f} horas")])
+    
+    if 'tempos_atendimento' in resultados and resultados['tempos_atendimento']:
+        layout.append([sg.Text("")])
+        layout.append([sg.Text("Tempos de Atendimento:", font=('Arial', 12))])
+        
+        atendimentos = resultados['tempos_atendimento']
+        if atendimentos:
+            media_atend = sum(atendimentos) / len(atendimentos)
+            min_atend = min(atendimentos)
+            max_atend = max(atendimentos)
+            layout.append([sg.Text(f"  Media: {media_atend:.2f} horas")])
+            layout.append([sg.Text(f"  Minimo: {min_atend:.2f} horas")])
+            layout.append([sg.Text(f"  Maximo: {max_atend:.2f} horas")])
+    
+    layout.append([sg.Text("")])
+    layout.append([sg.Button("Fechar", size=(15,1))])
+    
+    sg.Window("Resultados Detalhados", layout, modal=True, size=(650, 500)).read(close=True)
+
+
+def mostrarGraficos(resultados, medicos):
+    try:
+        # Validate input data
+        if not resultados or not medicos:
+            sg.popup_error("Dados insuficientes para gerar gráficos.")
+            return
+
+        fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('Análise da Simulação Clínica', fontsize=16, fontweight='bold', y=0.98)
+
+        # Graph 1: Doctor Occupancy
+        if 'ocupacao_medicos' in resultados and resultados['ocupacao_medicos'] and len(resultados['ocupacao_medicos']) > 0:
+            medicos_nomes = [m['nome'][:12] for m in medicos]
+            ocupacoes = resultados['ocupacao_medicos']
+
+            # Ensure data consistency
+            num_items = min(len(ocupacoes), len(medicos_nomes))
+            if num_items == 0:
+                axs[0, 0].text(0.5, 0.5, 'Sem dados de ocupação',
+                              ha='center', va='center', transform=axs[0, 0].transAxes)
+                axs[0, 0].set_title('Ocupação dos Médicos (%)')
+                axs[0, 0].set_xlim(0, 1)
+                axs[0, 0].set_ylim(0, 1)
+            else:
+                medicos_nomes = medicos_nomes[:num_items]
+                ocupacoes = ocupacoes[:num_items]
+
+                cores = plt.cm.tab10(np.linspace(0, 1, num_items))
+                bars = axs[0, 0].bar(medicos_nomes, ocupacoes, color=cores, alpha=0.8, edgecolor='black', linewidth=0.5)
+                axs[0, 0].set_title('Ocupação dos Médicos (%)', fontsize=12, fontweight='bold')
+                axs[0, 0].set_ylabel('Porcentagem (%)', fontsize=10)
+                axs[0, 0].set_ylim(0, 105)
+                axs[0, 0].grid(axis='y', alpha=0.3, linestyle='--')
+                axs[0, 0].tick_params(axis='x', rotation=45)
+
+                for bar in bars:
+                    altura = bar.get_height()
+                    axs[0, 0].text(bar.get_x() + bar.get_width()/2., altura + 1,
+                                  f'{altura:.1f}%', ha='center', va='bottom', fontsize=9, fontweight='bold')
+        else:
+            axs[0, 0].text(0.5, 0.5, 'Dados não disponíveis',
+                          ha='center', va='center', transform=axs[0, 0].transAxes, fontsize=12)
+            axs[0, 0].set_title('Ocupação dos Médicos (%)', fontsize=12)
+        
+        if 'tempos_espera' in resultados and resultados['tempos_espera']:
+            tempos = resultados['tempos_espera']
+            axs[0, 1].hist(tempos, bins=15, color='skyblue', edgecolor='black', alpha=0.7)
+            axs[0, 1].set_title('Distribuicao de Tempos de Espera')
+            axs[0, 1].set_xlabel('Tempo (horas)')
+            axs[0, 1].set_ylabel('Frequencia')
+            
+            if tempos:
+                media = sum(tempos) / len(tempos)
+                axs[0, 1].axvline(media, color='red', linestyle='--', 
+                                label=f'Media: {media:.2f}h')
+                axs[0, 1].legend()
+            axs[0, 1].grid(alpha=0.3)
+        
+        # Graph 3: Service Time Distribution
+        if 'tempos_atendimento' in resultados and resultados['tempos_atendimento'] and len(resultados['tempos_atendimento']) > 0:
+            tempos = [t for t in resultados['tempos_atendimento'] if t > 0]  # Filter out invalid values
+
+            if len(tempos) == 0:
+                axs[1, 0].text(0.5, 0.5, 'Sem dados de atendimento válidos',
+                              ha='center', va='center', transform=axs[1, 0].transAxes)
+                axs[1, 0].set_title('Distribuição de Tempos de Atendimento')
+            else:
+                n_bins = min(20, len(tempos)) if len(tempos) > 5 else max(5, len(tempos))
+                axs[1, 0].hist(tempos, bins=n_bins, color='lightgreen', edgecolor='darkgreen', alpha=0.8, linewidth=0.5)
+                axs[1, 0].set_title('Distribuição de Tempos de Atendimento', fontsize=12, fontweight='bold')
+                axs[1, 0].set_xlabel('Tempo (horas)', fontsize=10)
+                axs[1, 0].set_ylabel('Frequência', fontsize=10)
+
+                media = sum(tempos) / len(tempos)
+                axs[1, 0].axvline(media, color='darkgreen', linestyle='--', linewidth=2,
+                                label=f'Média: {media:.3f}h')
+                axs[1, 0].legend(fontsize=9)
+                axs[1, 0].grid(alpha=0.3, linestyle='--')
+        else:
+            axs[1, 0].text(0.5, 0.5, 'Dados não disponíveis',
+                          ha='center', va='center', transform=axs[1, 0].transAxes, fontsize=12)
+            axs[1, 0].set_title('Distribuição de Tempos de Atendimento', fontsize=12)
+        
+        if 'atendimentos_por_medico' in resultados and resultados['atendimentos_por_medico']:
+            atendimentos = resultados['atendimentos_por_medico']
+            medicos_nomes = [m['nome'][:15] for m in medicos]
+            
+            num_graficos = min(len(atendimentos), len(medicos_nomes))
+            medicos_nomes = medicos_nomes[:num_graficos]
+            atendimentos = atendimentos[:num_graficos]
+            
+            cores = plt.cm.Pastel1(np.linspace(0, 1, len(medicos_nomes)))
+            bars = axs[1, 1].bar(medicos_nomes, atendimentos, color=cores)
+            axs[1, 1].set_title('Atendimentos por Medico')
+            axs[1, 1].set_ylabel('Numero de Atendimentos')
+            axs[1, 1].grid(axis='y', alpha=0.3)
+            
+            k = 0
+            for bar in bars:
+                altura = bar.get_height()
+                axs[1, 1].text(bar.get_x() + bar.get_width()/2., altura + 0.1,
+                              f'{int(altura)}', ha='center', va='bottom', fontsize=8)
+                k = k + 1
+        
+        # Ensure all subplots have proper formatting even if empty
+        for i in range(2):
+            for j in range(2):
+                if not axs[i, j].has_data():
+                    axs[i, j].text(0.5, 0.5, 'Dados não disponíveis',
+                                  ha='center', va='center', transform=axs[i, j].transAxes,
+                                  fontsize=12, color='gray', style='italic')
+                    axs[i, j].set_frame_on(False)
+                    axs[i, j].set_xticks([])
+                    axs[i, j].set_yticks([])
+        
+        criarJanelaGraficos(fig)
+        
+    except Exception as e:
+        sg.popup_error(f"Erro ao criar graficos: {str(e)}")
+
+
+def criarJanelaGraficos(fig):
+    def draw_figure(canvas, figure):
+        figure_canvas_agg = FigureCanvasTkAgg(figure, canvas)
+        figure_canvas_agg.draw()
+        figure_canvas_agg.get_tk_widget().pack(side='top', fill='both', expand=1)
+        return figure_canvas_agg
+    
+    layout = [
+        [sg.Text("Graficos da Simulacao", font=('Arial', 16))],
+        [sg.Canvas(key='-CANVAS-', size=(800, 600))],
+        [sg.Button("Salvar Imagem", key='-SAVE-', size=(15,1)), 
+         sg.Button("Fechar", key='-CLOSE-', size=(15,1))]
+    ]
+    
+    window = sg.Window("Graficos", layout, finalize=True, element_justification='center')
+    
+    canvas_elem = window['-CANVAS-']
+    canvas = canvas_elem.TKCanvas
+    figure_canvas_agg = draw_figure(canvas, fig)
+    
+    fechar_janela = False
+    while not fechar_janela:
+        event, values = window.read()
+        
+        if event == sg.WIN_CLOSED or event == '-CLOSE-':
+            fechar_janela = True
+        elif event == '-SAVE-':
+            filename = sg.popup_get_file('Salvar grafico como', 
+                                        save_as=True, 
+                                        default_extension='.png',
+                                        file_types=(("PNG files", "*.png"), 
+                                                   ("JPEG files", "*.jpg"),
+                                                   ("PDF files", "*.pdf"),
+                                                   ("All files", "*.*")))
+            if filename:
+                try:
+                    fig.savefig(filename, dpi=300, bbox_inches='tight')
+                    sg.popup("Sucesso", f"Grafico salvo em:\n{filename}")
+                except Exception as e:
+                    sg.popup_error(f"Erro ao salvar:\n{str(e)}")
+    
+    window.close()
+    plt.close(fig)
+
+
+if __name__ == "__main__":
+    interface()
