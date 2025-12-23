@@ -53,31 +53,31 @@ def m_id(e): # retorna o id do médico
     return e[0]
 
 def m_ocupado(e): # retorna se o médico está ocupado
-    return e[1]
+    return e[2]
 
 def mOcupa(m): # altera o estado de ocupado do médico
-    m[1] = not m[1]
+    m[2] = not m[2]
     return m
 
 def m_doente_corrente(e): # retorna o doente corrente do médico
-    return e[2]
+    return e[3]
 
 def mDoenteCorrente(m, d): # altera o doente corrente do médico
-    m[2] = d
+    m[3] = d
     return m
 
 def m_total_tempo_ocupado(e): # retorna o tempo total ocupado do médico
-    return e[3]
+    return e[5]
 
 def mTempoOcupado(m, t):  # altera o tempo total ocupado do médico
-    m[3] = t
+    m[5] = t
     return m
 
 def m_inicio_ultima_consulta(e): # retorna o tempo de início da última consulta do médico
-    return e[4]
+    return e[6]
 
 def mInicioConsulta(m, t): # altera o tempo de início da última consulta do médico
-    m[4] = t
+    m[6] = t
     return m 
 # ---
 
